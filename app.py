@@ -12,9 +12,10 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 # 2. Fetch existing data
 try:
-    df = conn.read() 
+    df = conn.read(worksheet="Sheet1", ttl=0)
 except Exception as e:
-    st.error("Could not read the sheet. Check if the Sheet URL is correct in Secrets.")
+    st.warning("Starting with a fresh table...")
+    df = pd.DataFrame(columns=["Date", "Description", "Amount", "Card", "Category", "Statement_Month"])
     df = pd.DataFrame() # Fallback to empty if it fails
 # 3. Sidebar: Quick Entry Form
 with st.sidebar:
