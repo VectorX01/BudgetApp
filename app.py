@@ -1,8 +1,8 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+from sys import exit
+from st_gsheets_connection import GSheetsConnection # Note the underscores here
 import pandas as pd
 from datetime import datetime
-
 st.set_page_config(page_title="Personal Finance Tracker", layout="wide")
 
 st.title("📊 Expense & Tally Tracker")
