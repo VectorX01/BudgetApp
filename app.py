@@ -31,7 +31,7 @@ with st.sidebar:
         date = st.date_input("Transaction Date", datetime.now())
         desc = st.text_input("Description (e.g., Starbucks)")
         amount = st.number_input("Amount ($)", min_value=0.0, step=0.01)
-        card = st.selectbox("Card Used", ["Chase", "Amex", "Discover", "Apple Card","Target"])
+        card = st.selectbox("Card Used", ["Chase", "Amex", "Discover", "Apple Card","Target","Checking","Other"])
         category = st.selectbox("Category", ["Dining", "Groceries", "Transit", "Rent", "Personal","Shopping","Education","Entertainment","Utilities","Other"])
         statement_month = st.selectbox("Assign to Statement Month",
                                        ["January", "February", "March", "April", "May", "June",
