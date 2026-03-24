@@ -30,7 +30,7 @@ with st.sidebar:
     with st.form("entry_form", clear_on_submit=True):
         date = st.date_input("Transaction Date", datetime.now())
         desc = st.text_input("Description (e.g., Starbucks)")
-        amount = st.number_input("Amount ($)", min_value=0.0, step=0.01)
+        amount = st.number_input("Amount ($) — negative for income/payment", min_value=None, step=0.01, value=0.0)
         card = st.selectbox("Card Used", ["Chase", "Amex", "Discover", "Apple Card","Target","Checking","Savings","Splitwise","Other"])
         category = st.selectbox("Category", ["Dining", "Groceries", "Transit", "Rent", "Personal","Shopping","Education","Entertainment","Utilities","Other"])
         statement_month = st.selectbox("Assign to Statement Month",
@@ -87,7 +87,7 @@ else:
     # Metrics Display
     m1, m2, m3 = st.columns(3)
     total_val = filtered_df["Amount"].sum()
-    m1.metric("Total Spending", f"${total_val:,.2f}")
+    m1.metric("Net Total", f"${total_val:,.2f}")
     m2.metric("Transaction Count", len(filtered_df))
     # Shows the average spend per transaction in this filtered view
     avg_spend = total_val / len(filtered_df) if len(filtered_df) > 0 else 0
