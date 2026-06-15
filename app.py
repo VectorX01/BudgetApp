@@ -59,7 +59,7 @@ with st.sidebar:
         ])
         card = st.selectbox("Card / Account", [
             "Chase", "Amex", "Discover", "Apple Card",
-            "Target", "Checking", "Savings", "Splitwise", "Other"
+            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage", "Other"
         ])
         category = st.selectbox("Category", [
             "Dining", "Groceries", "Transit", "Rent", "Personal",
