@@ -62,7 +62,7 @@ with st.sidebar:
             "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage", "Other"
         ])
         category = st.selectbox("Category", [
-            "Dining", "Groceries", "Transit", "Rent", "Personal",
+            "Dining", "Groceries", "Transit", "Rent", "Personal", "Travel",
             "Shopping", "Education", "Entertainment", "Utilities", "Donations", "Networking", "Immigration", "Other"
         ])
         statement_month = st.selectbox("Assign to Statement Month", [
