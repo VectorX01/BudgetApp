@@ -63,7 +63,7 @@ with st.sidebar:
         ])
         category = st.selectbox("Category", [
             "Dining", "Groceries", "Transit", "Rent", "Personal",
-            "Shopping", "Education", "Entertainment", "Utilities", "Donations", "Networking", "Other"
+            "Shopping", "Education", "Entertainment", "Utilities", "Donations", "Networking", "Immigration", "Other"
         ])
         statement_month = st.selectbox("Assign to Statement Month", [
             "January", "February", "March", "April", "May", "June",
