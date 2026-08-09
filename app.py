@@ -106,6 +106,37 @@ if df.empty or df["Statement_Month"].dropna().empty:
 else:
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 0 — ACCOUNT BALANCES
+    # Balance per account = sum of all signed amounts ever posted to that
+    # Card/Account (unfiltered — mirrors Section 2's "true net position" logic).
+    # Cards run a negative balance (money owed), so we flip the sign and label
+    # it "Due". Bank/investment accounts are shown as-is.
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.header("💰 Account Balances")
+
+    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Apple Card", "Target", "Splitwise", "Other"]
+    BANK_ACCOUNTS = [
+        "Checking", "Savings", "Marcus HYSA",
+        "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage",
+    ]
+
+    balances = df.groupby("Card")["Amount"].sum()
+
+    st.subheader("Cards — Amount Due")
+    card_cols = st.columns(len(CARD_ACCOUNTS))
+    for col, acct in zip(card_cols, CARD_ACCOUNTS):
+        bal = balances.get(acct, 0)
+        col.metric(f"{acct} Due", f"${-bal:,.2f}")
+
+    st.subheader("Bank & Investment Accounts")
+    bank_cols = st.columns(len(BANK_ACCOUNTS))
+    for col, acct in zip(bank_cols, BANK_ACCOUNTS):
+        bal = balances.get(acct, 0)
+        col.metric(acct, f"${bal:,.2f}")
+
+    st.divider()
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # SECTION 1 — SPENDING
     # Only Expense rows. Card payments never enter this view,
     # so filtering by a specific card will never zero out your totals.
