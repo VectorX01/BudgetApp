@@ -59,7 +59,7 @@ with st.sidebar:
         ])
         card = st.selectbox("Card / Account", [
             "Chase", "Amex", "Discover", "Apple Card",
-            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage", "Other"
+            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage","Samsung Card" "Other"
         ])
         category = st.selectbox("Category", [
             "Dining", "Groceries", "Transit", "Rent", "Personal", "Travel",
@@ -114,7 +114,7 @@ else:
     # ═══════════════════════════════════════════════════════════════════════════
     st.header("💰 Account Balances")
 
-    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Apple Card", "Target", "Splitwise", "Other"]
+    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Apple Card", "Target", "Splitwise", "Samsung Card", "Other"]
     BANK_ACCOUNTS = [
         "Checking", "Savings", "Marcus HYSA",
         "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage",
