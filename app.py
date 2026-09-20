@@ -58,8 +58,8 @@ with st.sidebar:
             "Card Payment (Card side)",   # clears the card balance
         ])
         card = st.selectbox("Card / Account", [
-            "Chase", "Amex", "Discover", "Apple Card",
-            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage","Samsung Card" "Other"
+            "Chase", "Amex", "Discover",
+            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage","Samsung Card", "Other"
         ])
         category = st.selectbox("Category", [
             "Dining", "Groceries", "Transit", "Rent", "Personal", "Travel",
