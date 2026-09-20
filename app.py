@@ -1,232 +1,688 @@
+"""Budget Tracker — a dashboard over a single Google Sheet.
+
+Presentation only. All arithmetic lives in finance.py, the approved income
+reclassification in reclassify.py, and the chart specs in charts.py, so the
+numbers can be tested without a browser or credentials.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pandas as pd
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
-import pandas as pd
-from datetime import datetime
 
-st.set_page_config(page_title="Personal Finance Tracker", layout="wide")
-st.title("📊 Expense & Tally Tracker")
+import charts as C
+import finance as F
+import reclassify as R
 
-COLUMNS = ["Date", "Description", "Amount", "Card", "Category", "Statement_Month", "Transaction_Type"]
+st.set_page_config(page_title="Budget Tracker", layout="wide")
 
-# Sign convention:
-#   Expense                  → negative  (wealth goes down)
-#   Income                   → positive  (wealth goes up)
-#   Card Payment (Bank side) → negative  (cash leaves Savings/Checking)
-#   Card Payment (Card side) → positive  (cancels the bank side → net $0)
-SIGN_MAP = {
-    "Expense":                  -1,
-    "Income":                   +1,
-    "Card Payment (Bank side)": -1,
-    "Card Payment (Card side)": +1,
-}
+SHEET = "Sheet1"
+CACHE_TTL = 300  # seconds; the sheet changes on human timescales, not machine ones
+ALL_TIME = "All time"
 
-# ── 1. Connect ────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def theme_mode() -> str:
+    """Which palette to draw with. Dark is a selected palette, not a flip."""
+    for getter in (
+        lambda: st.context.theme.type,
+        lambda: st.get_option("theme.base"),
+    ):
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value in ("light", "dark"):
+            return value
+    return "light"
+
+
+def money(value: float | None, places: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"${value:,.{places}f}"
+
+
+def signed(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{'+' if value >= 0 else '−'}${abs(value):,.2f}"
+
+
+def percent(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value:,.0f}%"
+
+
+def label_period(period: pd.Period | None) -> str:
+    return ALL_TIME if period is None else period.strftime("%b %Y")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data
+# ──────────────────────────────────────────────────────────────────────────────
+
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# ── 2. Fetch & migrate ────────────────────────────────────────────────────────
+
+def read_ledger(ttl: int = CACHE_TTL) -> pd.DataFrame:
+    return conn.read(worksheet=SHEET, ttl=ttl, usecols=list(range(7)))
+
+
+def read_valuations(ttl: int = CACHE_TTL) -> pd.DataFrame | None:
+    """The Valuations tab is optional — not having one yet is a normal state."""
+    try:
+        return conn.read(
+            worksheet=F.VALUATIONS_WORKSHEET, ttl=ttl, usecols=list(range(3))
+        )
+    except Exception:
+        return None
+
+
 try:
-    df = conn.read(worksheet="Sheet1", ttl=5, usecols=list(range(7)))
-    df = df.dropna(how="all")
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
+    raw = read_ledger()
+except Exception as error:  # a failed read is an error, never "no transactions"
+    st.title("Budget Tracker")
+    st.error(
+        "Could not read the Google Sheet, so no figures below would be "
+        f"trustworthy.\n\n**{type(error).__name__}:** {error}"
+    )
+    st.caption(
+        "Check that the `gsheets` connection secret is set and that the sheet "
+        "is still shared with the service account, then use Refresh."
+    )
+    if st.button("Refresh"):
+        st.cache_data.clear()
+        st.rerun()
+    st.stop()
 
-    # Backfill rows that predate the Transaction_Type column
-    df["Transaction_Type"] = df["Transaction_Type"].fillna("Expense")
+df = F.prepare(raw)
+valuations = F.prepare_valuations(read_valuations())
+mode = theme_mode()
 
-    # Migration: old Expense rows were stored as positive → flip to negative
-    # New rows are stored negative already, so this only affects old data
-    old_expense_mask = (df["Transaction_Type"] == "Expense") & (df["Amount"] > 0)
-    df.loc[old_expense_mask, "Amount"] = df.loc[old_expense_mask, "Amount"] * -1
+if df.empty:
+    st.title("Budget Tracker")
+    st.info(
+        "The sheet is reachable but has no usable rows yet. Add your first "
+        "transaction from the sidebar and this page will fill in."
+    )
+    st.stop()
 
-except Exception as e:
-    st.warning(f"Could not load data: {e}")
-    df = pd.DataFrame(columns=COLUMNS)
+summary = F.monthly_summary(df)
+worth_series = F.net_worth_series(df)
+periods = list(summary["Month"])
 
-# ── 3. Sidebar: Entry Form ────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("Add New Transaction")
-    with st.form("entry_form", clear_on_submit=True):
-        date = st.date_input("Transaction Date", datetime.now())
-        desc = st.text_input("Description (e.g., Starbucks)")
-        amount = st.number_input("Amount ($) — always enter as positive", min_value=0.0, step=0.01, value=0.0)
-        txn_type = st.selectbox("Transaction Type", [
-            "Expense",
-            "Income",
-            "Card Payment (Bank side)",   # cash leaving Savings/Checking
-            "Card Payment (Card side)",   # clears the card balance
-        ])
-        card = st.selectbox("Card / Account", [
-            "Chase", "Amex", "Discover",
-            "Target", "Checking", "Savings", "Splitwise", "Marcus HYSA", "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage","Samsung Card", "Other"
-        ])
-        category = st.selectbox("Category", [
-            "Dining", "Groceries", "Transit", "Rent", "Personal", "Travel",
-            "Shopping", "Education", "Entertainment", "Utilities", "Donations", "Networking", "Immigration", "Other"
-        ])
-        statement_month = st.selectbox("Assign to Statement Month", [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-        ])
-        submit = st.form_submit_button("Add to Tracker")
 
-    if submit:
-        signed_amount = amount * SIGN_MAP[txn_type]
-        new_row = pd.DataFrame([{
-            "Date":             date.strftime("%Y-%m-%d"),
-            "Description":      desc,
-            "Amount":           signed_amount,
-            "Card":             card,
-            "Category":         category,
-            "Statement_Month":  statement_month,
-            "Transaction_Type": txn_type,
-        }])
-        updated_df = pd.concat([df, new_row], ignore_index=True)
-        try:
-            conn.update(worksheet="Sheet1", data=updated_df)
-            st.success("Transaction recorded!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to save: {e}")
+# ──────────────────────────────────────────────────────────────────────────────
+# Header — one period control drives every tab
+# ──────────────────────────────────────────────────────────────────────────────
+
+if "period_index" not in st.session_state:
+    st.session_state.period_index = len(periods) - 1
+
+heading, spacer, refresh = st.columns([5, 3, 1])
+heading.title("Budget Tracker")
+with refresh:
+    st.write("")
+    if st.button("Refresh", use_container_width=True, help="Re-read the sheet now"):
+        st.cache_data.clear()
+        st.rerun()
+
+back, picker, forward, asof = st.columns([1, 3, 1, 7])
+index = min(st.session_state.period_index, len(periods) - 1)
+if back.button("‹", use_container_width=True, disabled=index == 0, help="Previous month"):
+    st.session_state.period_index = index - 1
+    st.rerun()
+if forward.button(
+    "›", use_container_width=True, disabled=index >= len(periods) - 1, help="Next month"
+):
+    st.session_state.period_index = index + 1
+    st.rerun()
+
+chosen = picker.selectbox(
+    "Period",
+    options=list(range(len(periods))),
+    index=index,
+    format_func=lambda i: label_period(periods[i]),
+    label_visibility="collapsed",
+)
+if chosen != index:
+    st.session_state.period_index = chosen
+    st.rerun()
+
+period = periods[index]
+month_rows = df[df["Month"] == period]
+previous = summary.iloc[index - 1] if index > 0 else None
+current = summary.iloc[index]
+asof.caption(
+    f"{len(df):,} transactions · {df['Date'].min():%d %b %Y} to "
+    f"{df['Date'].max():%d %b %Y} · net worth {money(F.net_worth(df, valuations))}"
+)
+
+overview_tab, spending_tab, accounts_tab, portfolio_tab = st.tabs(
+    ["Overview", "Spending", "Accounts", "Portfolio"]
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Overview
+# ──────────────────────────────────────────────────────────────────────────────
+
+with overview_tab:
+    a, b, c, d = st.columns(4)
+    a.metric(
+        "Earned",
+        money(current["Earned"]),
+        delta=None if previous is None else signed(current["Earned"] - previous["Earned"]),
+    )
+    other = current["Earned"] - current["Salary"]
+    a.caption(
+        f"salary {money(current['Salary'], 0)}"
+        + (f" · other {money(other, 0)}" if abs(other) >= 1 else "")
+    )
+
+    b.metric(
+        "Spent",
+        money(current["Spent"]),
+        delta=None if previous is None else signed(current["Spent"] - previous["Spent"]),
+        delta_color="inverse",
+    )
+    b.caption("expenses net of refunds")
+
+    c.metric(
+        "Saved",
+        money(current["Saved"]),
+        delta=None if previous is None else signed(current["Saved"] - previous["Saved"]),
+    )
+    c.caption(f"net worth moved {signed(current['Net worth Δ'])}")
+
+    d.metric("Save rate", percent(current["Save rate"]))
+    d.caption(
+        "—" if pd.isna(current["Save rate"]) else "of everything earned this month"
+    )
 
     st.divider()
-    st.caption("""
-💡 **How to log a card payment (2 entries that cancel out):**
 
-1. Card: **Savings** · Type: `Card Payment (Bank side)` · $200 → stored as −$200
-2. Card: **Chase** · Type: `Card Payment (Card side)` · $200 → stored as +$200
+    left, right = st.columns([1, 1])
+    with left:
+        st.subheader("Net worth")
+        st.caption("Every month since the ledger opened. Cost basis unless a valuation exists.")
+        st.altair_chart(
+            C.net_worth(worth_series, mode, highlight=period),
+            use_container_width=True,
+            theme=None,
+        )
+    with right:
+        st.subheader("Earned against spent")
+        st.caption("The gap between the bars is what you kept.")
+        st.altair_chart(
+            C.earned_vs_spent(summary.tail(12), mode), use_container_width=True, theme=None
+        )
 
-Net effect on any aggregate view: **$0** ✓
-    """)
+    if previous is not None:
+        now = F.category_spend(month_rows)
+        before = F.category_spend(df[df["Month"] == periods[index - 1]])
+        shift = (now.reindex(now.index.union(before.index)).fillna(0)
+                 - before.reindex(now.index.union(before.index)).fillna(0))
+        shift = shift[shift.abs() > 1]
+        if not shift.empty:
+            biggest = shift.abs().idxmax()
+            direction = "more" if shift[biggest] > 0 else "less"
+            st.caption(
+                f"Biggest move against {label_period(periods[index - 1])}: "
+                f"**{money(abs(shift[biggest]))} {direction}** on {biggest}."
+            )
 
-# ── 4. Main Dashboard ─────────────────────────────────────────────────────────
-if df.empty or df["Statement_Month"].dropna().empty:
-    st.info("No transactions yet. Add one using the sidebar!")
-else:
+    with st.expander("Month by month"):
+        table = summary.copy()
+        table["Month"] = table["Month"].map(label_period)
+        st.dataframe(
+            table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                col: st.column_config.NumberColumn(col, format="$%.2f")
+                for col in ("Earned", "Salary", "Spent", "Saved", "Net worth Δ")
+            }
+            | {"Save rate": st.column_config.NumberColumn("Save rate", format="%.1f%%")},
+        )
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # SECTION 0 — ACCOUNT BALANCES
-    # Balance per account = sum of all signed amounts ever posted to that
-    # Card/Account (unfiltered — mirrors Section 2's "true net position" logic).
-    # Cards run a negative balance (money owed), so we flip the sign and label
-    # it "Due". Bank/investment accounts are shown as-is.
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.header("💰 Account Balances")
 
-    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Target", "Splitwise", "Samsung Card", "Other"]
-    BANK_ACCOUNTS = [
-        "Checking", "Savings", "Marcus HYSA",
-        "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage",
-    ]
+# ──────────────────────────────────────────────────────────────────────────────
+# Spending
+# ──────────────────────────────────────────────────────────────────────────────
 
-    balances = df.groupby("Card")["Amount"].sum()
+with spending_tab:
+    st.caption(
+        "Statement months live here, matching what appears on each bill. "
+        "Every other tab measures by transaction date."
+    )
+    statement_periods = sorted(p for p in df["Statement_Period"].dropna().unique())
+    options = [ALL_TIME] + [label_period(p) for p in statement_periods]
+    default = label_period(period) if label_period(period) in options else ALL_TIME
+    picked = st.selectbox("Statement month", options, index=options.index(default))
 
-    st.subheader("Cards — Amount Due")
-    card_cols = st.columns(len(CARD_ACCOUNTS))
-    for col, acct in zip(card_cols, CARD_ACCOUNTS):
-        bal = balances.get(acct, 0)
-        col.metric(f"{acct} Due", f"${-bal:,.2f}")
+    outgoing = df[df["Type"].isin(["Expense", "Refund"])].copy()
+    if picked != ALL_TIME:
+        target = statement_periods[options.index(picked) - 1]
+        outgoing = outgoing[outgoing["Statement_Period"] == target]
 
-    st.subheader("Bank & Investment Accounts")
-    bank_cols = st.columns(len(BANK_ACCOUNTS))
-    for col, acct in zip(bank_cols, BANK_ACCOUNTS):
-        bal = balances.get(acct, 0)
-        col.metric(acct, f"${bal:,.2f}")
+    with st.expander("Filters"):
+        f1, f2 = st.columns(2)
+        cards = sorted(outgoing["Card"].unique())
+        categories = sorted(outgoing["Category"].unique())
+        pick_cards = f1.multiselect("Accounts", cards, placeholder="All accounts")
+        pick_cats = f2.multiselect("Categories", categories, placeholder="All categories")
+        st.caption("Leave a filter empty to include everything.")
+    if pick_cards:
+        outgoing = outgoing[outgoing["Card"].isin(pick_cards)]
+    if pick_cats:
+        outgoing = outgoing[outgoing["Category"].isin(pick_cats)]
 
-    st.divider()
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # SECTION 1 — SPENDING
-    # Only Expense rows. Card payments never enter this view,
-    # so filtering by a specific card will never zero out your totals.
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.header("💸 Section 1 — Spending")
-    st.caption("Expense rows only. Card payments are excluded so totals are never zeroed out.")
-
-    expense_df = df[df["Transaction_Type"] == "Expense"].copy()
-
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        months_s1 = ["All"] + sorted(expense_df["Statement_Month"].dropna().unique().tolist())
-        selected_month_s1 = st.selectbox("Statement Month", months_s1, key="s1_month")
-    with f2:
-        cards_available = sorted(expense_df["Card"].dropna().unique().tolist())
-        selected_cards = st.multiselect("Cards", cards_available, default=cards_available, key="s1_cards")
-    with f3:
-        cats_available = sorted(expense_df["Category"].dropna().unique().tolist())
-        selected_cats = st.multiselect("Categories", cats_available, default=cats_available, key="s1_cats")
-
-    filtered_expense = expense_df.copy()
-    if selected_month_s1 != "All":
-        filtered_expense = filtered_expense[filtered_expense["Statement_Month"] == selected_month_s1]
-    filtered_expense = filtered_expense[filtered_expense["Card"].isin(selected_cards)]
-    filtered_expense = filtered_expense[filtered_expense["Category"].isin(selected_cats)]
-
-    # Amounts are stored negative — abs() for display
-    total_spent = filtered_expense["Amount"].sum()
-    count       = len(filtered_expense)
-    avg         = total_spent / count if count > 0 else 0
+    expenses_only = outgoing[outgoing["Type"] == "Expense"]
+    net_spend = -outgoing["Amount"].sum()
+    refunded = outgoing.loc[outgoing["Type"] == "Refund", "Amount"].sum()
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Spent",       f"${abs(total_spent):,.2f}")
-    m2.metric("Transaction Count", count)
-    m3.metric("Avg. Transaction",  f"${abs(avg):,.2f}")
+    m1.metric("Net spend", money(net_spend))
+    m1.caption(f"after {money(refunded)} of refunds" if refunded else "no refunds here")
+    m2.metric("Purchases", f"{len(expenses_only):,}")
+    m3.metric(
+        "Average purchase",
+        money(abs(expenses_only["Amount"].mean()) if len(expenses_only) else 0),
+    )
 
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        st.subheader("Spending by Card")
-        if not filtered_expense.empty:
-            st.bar_chart(filtered_expense.groupby("Card")["Amount"].sum().abs())
-        else:
-            st.write("No data")
-    with chart_col2:
-        st.subheader("Spending by Category")
-        if not filtered_expense.empty:
-            st.bar_chart(filtered_expense.groupby("Category")["Amount"].sum().abs())
-        else:
-            st.write("No data")
+    if outgoing.empty:
+        st.info("Nothing matches those filters. Clear one to widen the view.")
+    else:
+        chart_col, table_col = st.columns([3, 2])
+        with chart_col:
+            st.subheader("By category")
+            st.altair_chart(
+                C.category_spend(F.category_spend(outgoing), mode),
+                use_container_width=True,
+                theme=None,
+            )
+        with table_col:
+            st.subheader("By account")
+            by_card = (-outgoing.groupby("Card")["Amount"].sum()).sort_values(
+                ascending=False
+            )
+            st.dataframe(
+                by_card.rename("Net spend").reset_index().rename(columns={"Card": "Account"}),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Net spend": st.column_config.NumberColumn("Net spend", format="$%.2f")
+                },
+            )
 
-    st.subheader("Expense Transactions")
-    st.dataframe(
-        filtered_expense.sort_values("Date", ascending=False),
-        use_container_width=True,
-        column_config={"Amount": st.column_config.NumberColumn("Amount", format="$%.2f")},
+        st.subheader("Transactions")
+        st.dataframe(
+            outgoing.sort_values("Date", ascending=False)[
+                ["Date", "Description", "Amount", "Card", "Category", "Type"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+            },
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Accounts
+# ──────────────────────────────────────────────────────────────────────────────
+
+with accounts_tab:
+    report = F.integrity_report(df)
+    balances = F.balances(df)
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Assets", money(report["assets"]))
+    r2.metric("Card debt", money(report["card_debt"]))
+    r3.metric("Net worth", money(report["net_worth"]))
+    st.caption(
+        f"{money(report['assets'])} held − {money(report['card_debt'])} owed = "
+        f"{money(report['net_worth'])}. Every transfer pair cancels, so this is "
+        "simply the sum of the whole sheet."
     )
 
     st.divider()
+    st.subheader("Where the money sits")
+    for row_start in range(0, len(F.ASSET_ACCOUNTS), 3):
+        columns = st.columns(3)
+        for column, account in zip(columns, F.ASSET_ACCOUNTS[row_start : row_start + 3]):
+            market = F.latest_valuations(valuations).get(account)
+            column.metric(account, money(market if market is not None else balances.get(account, 0.0)))
+            if market is not None:
+                column.caption(f"market value · {money(balances.get(account, 0.0))} contributed")
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — NET CASH FLOW
-    # All rows included. No card/category filter here — filtering by card
-    # would break the math since payment pairs would be split across accounts.
-    # Signs handle everything: payment pairs cancel to $0 automatically.
-    # ═══════════════════════════════════════════════════════════════════════════
-    st.header("🏦 Section 2 — Net Cash Flow")
-    st.caption("All rows. Card payment pairs cancel to $0. Sum everything → your true net position.")
+    st.subheader("What you owe")
+    for column, account in zip(st.columns(len(F.CARD_ACCOUNTS)), F.CARD_ACCOUNTS):
+        column.metric(account, money(-balances.get(account, 0.0)))
 
-    months_s2 = ["All"] + sorted(df["Statement_Month"].dropna().unique().tolist())
-    selected_month_s2 = st.selectbox("Statement Month", months_s2, key="s2_month")
+    closed = [a for a in F.ARCHIVED_ACCOUNTS if a in balances.index]
+    if closed:
+        with st.expander(f"Closed accounts ({len(closed)})"):
+            st.caption("Kept out of the tiles above; their history still counts everywhere else.")
+            st.dataframe(
+                F.account_summary(df).query("Account in @closed"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Balance": st.column_config.NumberColumn("Balance", format="$%.2f"),
+                    "Last activity": st.column_config.DateColumn(format="DD MMM YYYY"),
+                },
+            )
 
-    cashflow_df = df.copy()
-    if selected_month_s2 != "All":
-        cashflow_df = cashflow_df[cashflow_df["Statement_Month"] == selected_month_s2]
+    st.divider()
+    st.subheader("Integrity")
+    orphans = report["orphans"]
+    if report["unlisted_accounts"]:
+        st.warning(
+            "These accounts appear in the sheet but are not in any display list, "
+            f"so they have no tile: {', '.join(report['unlisted_accounts'])}."
+        )
+    if len(orphans):
+        st.warning(
+            f"{len(orphans)} transfer legs have no counter-leg, "
+            f"{money(abs(report['transfer_residual']))} in total. Net worth is still "
+            "correct — the money really did leave — but these movements are "
+            "invisible to the spending views."
+        )
+        st.dataframe(
+            orphans[["Date", "Description", "Amount", "Card"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+            },
+        )
+    else:
+        st.success("Every transfer pair balances.")
 
-    income = cashflow_df[cashflow_df["Transaction_Type"] == "Income"]["Amount"].sum()   # positive
-    spent  = cashflow_df[cashflow_df["Transaction_Type"] == "Expense"]["Amount"].sum()  # negative
-    net    = cashflow_df["Amount"].sum()                                                 # income - expenses
+    plan = R.plan(df)
+    with st.expander(
+        f"Income reclassification ({len(plan)} rows pending)"
+        if len(plan)
+        else "Income reclassification (nothing pending)"
+    ):
+        if plan.empty:
+            st.caption(
+                "All income rows carry a real category and refunds are typed as "
+                "refunds. Nothing to do."
+            )
+        else:
+            st.caption(
+                "Applies the approved mapping: merchant refunds become Refund rows "
+                "that offset the category they reverse, and the remaining income "
+                "rows get a real category instead of Other. Amounts are never "
+                "touched, so net worth cannot change."
+            )
+            st.dataframe(
+                plan[["Date", "Description", "Amount", "From", "To"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                    "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                },
+            )
+            leftover = R.unclassified(df)
+            if len(leftover):
+                st.caption(f"{len(leftover)} income rows match no rule and stay as they are.")
+            if st.button("Apply to the sheet", type="primary"):
+                try:
+                    fresh = read_ledger(ttl=0).dropna(how="all")
+                    replan = R.plan(F.prepare(fresh))
+                    conn.update(worksheet=SHEET, data=R.apply_plan(fresh, replan))
+                except Exception as error:
+                    st.error(f"Could not write to the sheet — {type(error).__name__}: {error}")
+                else:
+                    st.cache_data.clear()
+                    st.success(f"Reclassified {len(replan)} rows.")
+                    st.rerun()
 
-    n1, n2, n3 = st.columns(3)
-    n1.metric("Total Income", f"${income:,.2f}")
-    n2.metric("Total Spent",  f"${abs(spent):,.2f}")
-    n3.metric("Net",          f"${net:,.2f}")
 
-    st.subheader("All Transactions")
-    st.dataframe(
-        cashflow_df.sort_values("Date", ascending=False),
-        use_container_width=True,
-        column_config={
-            "Amount":           st.column_config.NumberColumn("Amount", format="$%.2f"),
-            "Transaction_Type": st.column_config.TextColumn("Type"),
-        },
+# ──────────────────────────────────────────────────────────────────────────────
+# Portfolio
+# ──────────────────────────────────────────────────────────────────────────────
+
+with portfolio_tab:
+    position = F.portfolio_position(df, valuations)
+
+    if valuations.empty:
+        st.subheader("No valuations logged yet")
+        st.markdown(
+            "The balances elsewhere in this app are **cash you contributed**, not "
+            "what your holdings are worth. Schwab reads "
+            f"**{money(F.cost_basis(df, 'Schwab Brokerage'))}** because that is "
+            "what you paid in — the market has had no say in that number.\n\n"
+            "Log your account's total value once a week and this tab starts "
+            "separating market movement from deposits."
+        )
+    else:
+        st.dataframe(
+            position,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Contributed": st.column_config.NumberColumn(format="$%.2f"),
+                "Market value": st.column_config.NumberColumn(format="$%.2f"),
+                "Unrealised": st.column_config.NumberColumn(format="$%.2f"),
+                "Return %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Valued on": st.column_config.DateColumn(format="DD MMM YYYY"),
+            },
+        )
+
+        valued = sorted(valuations["Account"].unique())
+        account = (
+            st.selectbox("Account", valued) if len(valued) > 1 else valued[0]
+        )
+        history = F.mtm_history(df, valuations, account)
+
+        if len(history) < 2:
+            st.info(
+                "One valuation logged. A second one next week gives this tab a "
+                "movement to report."
+            )
+        else:
+            latest = history.iloc[-1]
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Market value", money(latest["Market value"]))
+            g2.metric("Unrealised", signed(latest["Unrealised"]))
+            g3.metric("Last week's movement", signed(latest["Market gain"]))
+            g3.caption("deposits excluded — this is the market alone")
+
+            left, right = st.columns([3, 2])
+            with left:
+                st.subheader("Value against what you put in")
+                st.caption("The gap between the two lines is your gain.")
+                st.altair_chart(
+                    C.market_vs_basis(history, mode), use_container_width=True, theme=None
+                )
+            with right:
+                st.subheader("Weekly movement")
+                st.caption("Change in value with deposits taken out.")
+                st.altair_chart(
+                    C.weekly_gain(history, mode), use_container_width=True, theme=None
+                )
+
+        st.dataframe(
+            history,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Week of", format="DD MMM YYYY"),
+                "Market value": st.column_config.NumberColumn(format="$%.2f"),
+                "Contributed": st.column_config.NumberColumn("Deposits", format="$%.2f"),
+                "Change": st.column_config.NumberColumn(format="$%.2f"),
+                "Market gain": st.column_config.NumberColumn(format="$%.2f"),
+                "Cost basis": st.column_config.NumberColumn(format="$%.2f"),
+                "Unrealised": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
+
+    st.divider()
+    st.subheader("Log this week's values")
+    with st.form("valuation_form", clear_on_submit=True):
+        columns = st.columns([2, 3, 2])
+        valued_on = columns[0].date_input("Date", date.today())
+        accounts = columns[1].multiselect(
+            "Accounts", F.INVESTMENT_ACCOUNTS, default=F.INVESTMENT_ACCOUNTS[:1]
+        )
+        st.caption("Enter the total value your broker shows, not a per-holding figure.")
+        amounts = {
+            account: st.number_input(
+                f"{account} market value", min_value=0.0, step=0.01, format="%.2f"
+            )
+            for account in accounts
+        }
+        if st.form_submit_button("Save valuations", type="primary"):
+            rows = [
+                {
+                    "Date": valued_on.strftime("%Y-%m-%d"),
+                    "Account": account,
+                    "Market_Value": value,
+                }
+                for account, value in amounts.items()
+                if value > 0
+            ]
+            if not rows:
+                st.warning("Enter a value above zero for at least one account.")
+            else:
+                try:
+                    existing = read_valuations(ttl=0)
+                    base = (
+                        pd.DataFrame(columns=F.VALUATION_COLUMNS)
+                        if existing is None
+                        else existing.dropna(how="all")
+                    )
+                    conn.update(
+                        worksheet=F.VALUATIONS_WORKSHEET,
+                        data=pd.concat([base, pd.DataFrame(rows)], ignore_index=True)[
+                            F.VALUATION_COLUMNS
+                        ],
+                    )
+                except Exception as error:
+                    st.error(
+                        f"Could not write the valuations — {type(error).__name__}: {error}\n\n"
+                        f"If the tab does not exist yet, add a worksheet named "
+                        f"`{F.VALUATIONS_WORKSHEET}` with the headers "
+                        f"`{'`, `'.join(F.VALUATION_COLUMNS)}` and try again."
+                    )
+                else:
+                    st.cache_data.clear()
+                    st.success(f"Logged {len(rows)} valuation(s).")
+                    st.rerun()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sidebar — entry
+# ──────────────────────────────────────────────────────────────────────────────
+
+def statement_choices(around: date) -> list[pd.Period]:
+    centre = pd.Period(year=around.year, month=around.month, freq="M")
+    return [centre - 1, centre, centre + 1]
+
+
+def append_rows(rows: list[dict]) -> None:
+    """Re-read before writing so a direct edit to the sheet is never clobbered."""
+    fresh = read_ledger(ttl=0).dropna(how="all")
+    combined = pd.concat([fresh, pd.DataFrame(rows)], ignore_index=True)
+    conn.update(worksheet=SHEET, data=combined[list(fresh.columns)])
+
+
+with st.sidebar:
+    st.subheader("Add transaction")
+    entry_type = st.selectbox("Type", F.ENTRY_TYPES)
+    st.caption(
+        {
+            "Expense": "Money spent.",
+            "Income": "Money earned or received.",
+            "Refund": "A return or credit. Offsets the category it reverses.",
+            "Transfer": "Moving money between your own accounts — including "
+            "paying off a card. Both sides are written for you.",
+        }[entry_type]
     )
+
+    # Date sits outside the form so the statement-month options track it. Inside
+    # a form nothing reruns until submit, which would offer months chosen for
+    # whatever date was showing when the form last rendered.
+    when = st.date_input("Date", date.today())
+
+    with st.form("entry_form", clear_on_submit=True):
+        description = st.text_input("Description")
+        amount = st.number_input("Amount", min_value=0.0, step=0.01, format="%.2f")
+
+        all_accounts = F.ASSET_ACCOUNTS + F.CARD_ACCOUNTS
+        source = destination = account = None
+        category = "Other"
+
+        if entry_type == "Transfer":
+            source = st.selectbox("From", F.ASSET_ACCOUNTS)
+            destination = st.selectbox("To", [a for a in all_accounts], index=len(F.ASSET_ACCOUNTS))
+        else:
+            account = st.selectbox("Account", all_accounts)
+            category = st.selectbox(
+                "Category",
+                F.INCOME_CATEGORIES if entry_type == "Income" else F.EXPENSE_CATEGORIES,
+            )
+
+        choices = statement_choices(when if isinstance(when, date) else date.today())
+        statement = st.selectbox(
+            "Statement month", choices, index=1, format_func=label_period
+        )
+        submitted = st.form_submit_button("Add", type="primary", use_container_width=True)
+
+    if submitted:
+        if amount <= 0:
+            st.error("Enter an amount above zero.")
+        elif entry_type == "Transfer" and source == destination:
+            st.error("Pick two different accounts.")
+        else:
+            statement_name = F.MONTHS[statement.month - 1]
+            base = {
+                "Date": when.strftime("%Y-%m-%d"),
+                "Description": description.strip() or entry_type,
+                "Statement_Month": statement_name,
+            }
+            if entry_type == "Transfer":
+                rows = [
+                    {**base, "Amount": -amount, "Card": source,
+                     "Category": "Other", "Transaction_Type": "Transfer (out)"},
+                    {**base, "Amount": amount, "Card": destination,
+                     "Category": "Other", "Transaction_Type": "Transfer (in)"},
+                ]
+            else:
+                rows = [
+                    {
+                        **base,
+                        "Amount": amount * F.SIGN[entry_type],
+                        "Card": account,
+                        "Category": category,
+                        "Transaction_Type": entry_type,
+                    }
+                ]
+            try:
+                append_rows(rows)
+            except Exception as error:
+                st.error(f"Could not save — {type(error).__name__}: {error}")
+            else:
+                st.cache_data.clear()
+                st.success(
+                    "Transfer recorded on both sides."
+                    if entry_type == "Transfer"
+                    else "Transaction recorded."
+                )
+                st.rerun()
