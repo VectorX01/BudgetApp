@@ -152,7 +152,7 @@ def net_worth(series: pd.DataFrame, mode: str, highlight: pd.Period | None = Non
 def earned_vs_spent(summary: pd.DataFrame, mode: str):
     """Two series, so a legend is always present. Grouped, not stacked."""
     ink = palette(mode)
-    data = _months_to_dates(summary)[["Date", "Earned", "Spent"]]
+    data = _months_to_dates(summary, "Period")[["Date", "Earned", "Spent"]]
     long = data.melt("Date", var_name="Series", value_name="Amount")
 
     bars = (

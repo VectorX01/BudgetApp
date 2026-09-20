@@ -91,6 +91,11 @@ NON_EARNED_CATEGORIES = ["Opening balance"]
 # Below this much income in a month, a savings percentage is noise; show nothing.
 RATE_FLOOR = 100.0
 
+# How a month is defined. Statement is the default because that is when the
+# money is felt: a July card swipe is not paid for until the August bill.
+BASIS_COLUMN = {"statement": "Statement_Period", "calendar": "Month"}
+BASIS_LABEL = {"statement": "Statement month", "calendar": "Calendar month"}
+
 VALUATION_COLUMNS = ["Date", "Account", "Market_Value"]
 VALUATIONS_WORKSHEET = "Valuations"
 
@@ -225,42 +230,40 @@ def net_worth(df: pd.DataFrame, valuations: pd.DataFrame | None = None) -> float
 # Monthly summary
 # ──────────────────────────────────────────────────────────────────────────────
 
-def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Earned / spent / saved per calendar month.
+def monthly_summary(df: pd.DataFrame, basis: str = "statement") -> pd.DataFrame:
+    """Earned / spent / saved per period, on either basis.
 
-    Keyed on transaction date, never on statement month: 8 transfer pairs in the
-    current sheet have their two legs in different statement periods, which
-    would leave up to $410 of phantom movement in a month's arithmetic.
+        earned   income, excluding bookkeeping-only opening balances
+        spent    expenses net of refunds
+        saved    earned - spent
 
-        earned        income, excluding bookkeeping-only opening balances
-        spent         expenses net of refunds
-        saved         earned - spent
-        net worth Δ   every signed amount in the month
+    ``basis="statement"`` (the default) groups rows the way the card bills land,
+    which is how the money is actually felt: a July swipe is not paid for until
+    the August statement is settled. ``basis="calendar"`` groups by transaction
+    date, which is what reconciling against a bank statement needs.
 
-    ``Saved`` and ``Net worth Δ`` are close but not identical, and the gap is
-    real rather than a rounding artifact. They differ by opening balances
-    (excluded from earnings on purpose) and by transfer legs with no counter-leg
-    — currently $153.08, the four Discover payoffs whose card side was never
-    recorded. The Accounts tab reports that gap rather than hiding it.
+    Either basis is safe here. All three figures are built from Income, Expense
+    and Refund rows only, so the transfer legs that straddle statement periods
+    never enter the arithmetic — that residual can only reach a total that sums
+    every row, which is ``net_worth_change`` and stays dated for that reason.
     """
     if df.empty:
         return pd.DataFrame(
-            columns=[
-                "Month", "Earned", "Salary", "Spent", "Saved",
-                "Save rate", "Net worth Δ",
-            ]
+            columns=["Period", "Earned", "Salary", "Spent", "Saved", "Save rate"]
         )
 
-    income = df[df["Type"] == "Income"]
+    column = BASIS_COLUMN[basis]
+    keyed = df[df[column].notna()]
+    income = keyed[keyed["Type"] == "Income"]
     earned = (
         income[~income["Category"].isin(NON_EARNED_CATEGORIES)]
-        .groupby("Month")["Amount"].sum()
+        .groupby(column)["Amount"].sum()
     )
-    salary = income[income["Category"] == "Salary"].groupby("Month")["Amount"].sum()
-    outgoing = df[df["Type"].isin(["Expense", "Refund"])]
-    spent = -outgoing.groupby("Month")["Amount"].sum()
+    salary = income[income["Category"] == "Salary"].groupby(column)["Amount"].sum()
+    outgoing = keyed[keyed["Type"].isin(["Expense", "Refund"])]
+    spent = -outgoing.groupby(column)["Amount"].sum()
 
-    months = pd.period_range(df["Month"].min(), df["Month"].max(), freq="M")
+    months = pd.period_range(keyed[column].min(), keyed[column].max(), freq="M")
     summary = pd.DataFrame(index=months)
     summary["Earned"] = earned.reindex(months).fillna(0.0)
     summary["Salary"] = salary.reindex(months).fillna(0.0)
@@ -272,10 +275,18 @@ def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
         (summary["Saved"] / summary["Earned"]).where(summary["Earned"] >= RATE_FLOOR)
         * 100
     )
-    summary["Net worth Δ"] = (
-        df.groupby("Month")["Amount"].sum().reindex(months).fillna(0.0)
-    )
-    return summary.rename_axis("Month").reset_index()
+    return summary.rename_axis("Period").reset_index()
+
+
+def net_worth_change(df: pd.DataFrame) -> pd.Series:
+    """Change in net worth per calendar month.
+
+    Always dated, never by statement: this sums every row including transfer
+    legs, and a statement label does not say when cash actually moved.
+    """
+    if df.empty:
+        return pd.Series(dtype="float64")
+    return df.groupby("Month")["Amount"].sum()
 
 
 def net_worth_series(df: pd.DataFrame) -> pd.DataFrame:

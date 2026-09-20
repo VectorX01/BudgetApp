@@ -67,8 +67,16 @@ Splitwise. History must remain queryable; they must not occupy balance tiles.
   from the transaction date (the statement falls 0–2 months after it); this
   resolves 998 of 1,001 rows cleanly.
 - Transfer pairs do not reliably share a statement month — 8 pairs have their
-  legs in different periods. Any money arithmetic must key on transaction date.
-  `Statement_Month` remains valid only for "what is on this bill".
+  legs in different periods. This constrains **only** a figure that sums every
+  row, i.e. net worth. It cannot affect Earned, Spent or Saved, which are built
+  from Income, Expense and Refund rows alone and never touch a transfer leg.
+- **Statement month is the owner's primary lens and the product default.** A
+  card purchase is not felt until the bill for it is paid, so a late-July swipe
+  belongs to the August statement. Calendar month is offered alongside it for
+  reconciling against a bank statement. One control in the header sets the
+  basis for every tab. The running net-worth curve is the single exception and
+  stays dated: a cumulative balance needs real dates to be ordered, and the
+  Aug 2026 statement contains June transactions.
 - Four Discover payoffs totalling $153.06 have no counter-leg (Discover was
   never tracked in `Sheet1`). Correct for net worth, invisible to expense views.
 - The June Amex payment legs differ by $0.02 (3,227.15 in / 3,227.17 out).
@@ -107,8 +115,10 @@ Real, verified figures as of 2026-09-20 (no fabrication — all recomputed from
 
 1. **Reconciliation is the product.** Any feature that could make a displayed
    balance disagree with the real institution is wrong, however useful it looks.
-2. **Date is the unit of money; statement month is the unit of billing.** Never
-   let the two swap roles.
+2. **Statement month is how the money is felt; transaction date is how the
+   balance moves.** Statement month leads. Never show both bases at once
+   without one control governing them, and never let a screen disagree with
+   its neighbour about what a month is.
 3. **Entry effort is the binding constraint.** Every row is typed by hand, so
    reducing keystrokes and preventing entry mistakes beats adding analysis.
 4. **Show cost basis and market value as separate facts.** Never let a

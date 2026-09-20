@@ -65,6 +65,18 @@ def label_period(period: pd.Period | None) -> str:
     return ALL_TIME if period is None else period.strftime("%b %Y")
 
 
+def md(text: str) -> str:
+    """Escape dollar signs for any Streamlit markdown surface.
+
+    st.caption, st.markdown and st.warning read `$…$` as inline LaTeX, so two
+    money figures in one string turn the text between them into italic maths and
+    swallow both dollar signs. Escaping is harmless when there is only one, so
+    every money-bearing string goes through here rather than being audited
+    case by case.
+    """
+    return text.replace("$", r"\$")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Data
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,33 +127,52 @@ if df.empty:
     )
     st.stop()
 
-summary = F.monthly_summary(df)
 worth_series = F.net_worth_series(df)
-periods = list(summary["Month"])
+nw_change = F.net_worth_change(df)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Header — one period control drives every tab
 # ──────────────────────────────────────────────────────────────────────────────
 
-if "period_index" not in st.session_state:
-    st.session_state.period_index = len(periods) - 1
-
 heading, spacer, refresh = st.columns([5, 3, 1])
 heading.title("Budget Tracker")
 with refresh:
     st.write("")
-    if st.button("Refresh", use_container_width=True, help="Re-read the sheet now"):
+    if st.button("Refresh", width="stretch", help="Re-read the sheet now"):
         st.cache_data.clear()
         st.rerun()
 
-back, picker, forward, asof = st.columns([1, 3, 1, 7])
-index = min(st.session_state.period_index, len(periods) - 1)
-if back.button("‹", use_container_width=True, disabled=index == 0, help="Previous month"):
+back, picker, forward, basis_col, asof = st.columns([1, 2.4, 1, 3.4, 5.2])
+
+# One control, read before anything is computed, driving every tab. Statement
+# month is the default because that is when a card purchase is actually paid.
+basis = basis_col.radio(
+    "Period basis",
+    list(F.BASIS_LABEL),
+    format_func=lambda key: F.BASIS_LABEL[key],
+    horizontal=True,
+    label_visibility="collapsed",
+    help=(
+        "Statement month groups each purchase into the bill that pays for it, "
+        "so a late-July swipe counts against the August statement. Calendar "
+        "month groups by transaction date, which is what you need when "
+        "reconciling against a bank statement."
+    ),
+)
+summary = F.monthly_summary(df, basis)
+periods = list(summary["Period"])
+
+# Default to the newest period, and clamp on every run: switching basis can
+# change how many periods exist.
+if "period_index" not in st.session_state:
+    st.session_state.period_index = len(periods) - 1
+index = min(max(st.session_state.period_index, 0), len(periods) - 1)
+if back.button("‹", width="stretch", disabled=index == 0, help="Previous month"):
     st.session_state.period_index = index - 1
     st.rerun()
 if forward.button(
-    "›", use_container_width=True, disabled=index >= len(periods) - 1, help="Next month"
+    "›", width="stretch", disabled=index >= len(periods) - 1, help="Next month"
 ):
     st.session_state.period_index = index + 1
     st.rerun()
@@ -158,12 +189,15 @@ if chosen != index:
     st.rerun()
 
 period = periods[index]
-month_rows = df[df["Month"] == period]
+basis_column = F.BASIS_COLUMN[basis]
+month_rows = df[df[basis_column] == period]
 previous = summary.iloc[index - 1] if index > 0 else None
 current = summary.iloc[index]
 asof.caption(
-    f"{len(df):,} transactions · {df['Date'].min():%d %b %Y} to "
-    f"{df['Date'].max():%d %b %Y} · net worth {money(F.net_worth(df, valuations))}"
+    md(
+        f"{len(df):,} transactions · {df['Date'].min():%d %b %Y} to "
+        f"{df['Date'].max():%d %b %Y} · net worth {money(F.net_worth(df, valuations))}"
+    )
 )
 
 overview_tab, spending_tab, accounts_tab, portfolio_tab = st.tabs(
@@ -184,8 +218,10 @@ with overview_tab:
     )
     other = current["Earned"] - current["Salary"]
     a.caption(
-        f"salary {money(current['Salary'], 0)}"
-        + (f" · other {money(other, 0)}" if abs(other) >= 1 else "")
+        md(
+            f"salary {money(current['Salary'], 0)}"
+            + (f" · other {money(other, 0)}" if abs(other) >= 1 else "")
+        )
     )
 
     b.metric(
@@ -194,14 +230,18 @@ with overview_tab:
         delta=None if previous is None else signed(current["Spent"] - previous["Spent"]),
         delta_color="inverse",
     )
-    b.caption("expenses net of refunds")
+    b.caption(f"expenses net of refunds · {F.BASIS_LABEL[basis].lower()}")
 
     c.metric(
         "Saved",
         money(current["Saved"]),
         delta=None if previous is None else signed(current["Saved"] - previous["Saved"]),
     )
-    c.caption(f"net worth moved {signed(current['Net worth Δ'])}")
+    c.caption(
+        md(f"net worth moved {signed(nw_change.get(period, 0.0))}")
+        if basis == "calendar"
+        else "earned, less what this cycle's bills came to"
+    )
 
     d.metric("Save rate", percent(current["Save rate"]))
     d.caption(
@@ -213,17 +253,22 @@ with overview_tab:
     left, right = st.columns([1, 1])
     with left:
         st.subheader("Net worth")
-        st.caption("Every month since the ledger opened. Cost basis unless a valuation exists.")
+        st.caption(
+            "Every month since the ledger opened, by transaction date — a "
+            "running balance needs real dates. Cost basis unless a valuation exists."
+        )
         st.altair_chart(
-            C.net_worth(worth_series, mode, highlight=period),
-            use_container_width=True,
+            C.net_worth(
+                worth_series, mode, highlight=period if basis == "calendar" else None
+            ),
+            width="stretch",
             theme=None,
         )
     with right:
         st.subheader("Earned against spent")
         st.caption("The gap between the bars is what you kept.")
         st.altair_chart(
-            C.earned_vs_spent(summary.tail(12), mode), use_container_width=True, theme=None
+            C.earned_vs_spent(summary.tail(12), mode), width="stretch", theme=None
         )
 
     if previous is not None:
@@ -236,20 +281,22 @@ with overview_tab:
             biggest = shift.abs().idxmax()
             direction = "more" if shift[biggest] > 0 else "less"
             st.caption(
-                f"Biggest move against {label_period(periods[index - 1])}: "
-                f"**{money(abs(shift[biggest]))} {direction}** on {biggest}."
+                md(
+                    f"Biggest move against {label_period(periods[index - 1])}: "
+                    f"**{money(abs(shift[biggest]))} {direction}** on {biggest}."
+                )
             )
 
     with st.expander("Month by month"):
         table = summary.copy()
-        table["Month"] = table["Month"].map(label_period)
+        table["Period"] = table["Period"].map(label_period)
         st.dataframe(
             table,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 col: st.column_config.NumberColumn(col, format="$%.2f")
-                for col in ("Earned", "Salary", "Spent", "Saved", "Net worth Δ")
+                for col in ("Earned", "Salary", "Spent", "Saved")
             }
             | {"Save rate": st.column_config.NumberColumn("Save rate", format="%.1f%%")},
         )
@@ -260,19 +307,34 @@ with overview_tab:
 # ──────────────────────────────────────────────────────────────────────────────
 
 with spending_tab:
-    st.caption(
-        "Statement months live here, matching what appears on each bill. "
-        "Every other tab measures by transaction date."
-    )
-    statement_periods = sorted(p for p in df["Statement_Period"].dropna().unique())
-    options = [ALL_TIME] + [label_period(p) for p in statement_periods]
-    default = label_period(period) if label_period(period) in options else ALL_TIME
-    picked = st.selectbox("Statement month", options, index=options.index(default))
-
+    # Follows the header control, so this tab and the Overview can never
+    # disagree about what a month is.
     outgoing = df[df["Type"].isin(["Expense", "Refund"])].copy()
-    if picked != ALL_TIME:
-        target = statement_periods[options.index(picked) - 1]
-        outgoing = outgoing[outgoing["Statement_Period"] == target]
+    scoped = outgoing[outgoing[basis_column] == period]
+    st.caption(
+        f"{label_period(period)} · {F.BASIS_LABEL[basis].lower()}"
+        + (
+            f" · covering transactions dated {scoped['Date'].min():%d %b %Y} "
+            f"to {scoped['Date'].max():%d %b %Y}"
+            if not scoped.empty
+            else ""
+        )
+    )
+    outgoing = scoped
+
+    other = "calendar" if basis == "statement" else "statement"
+    spend_here = -outgoing["Amount"].sum()
+    spend_other = -df[
+        (df[F.BASIS_COLUMN[other]] == period) & df["Type"].isin(["Expense", "Refund"])
+    ]["Amount"].sum()
+    if abs(spend_here - spend_other) > 0.005:
+        st.caption(
+            md(
+                f"On a {F.BASIS_LABEL[other].lower()} basis the same month comes "
+                f"to {money(spend_other)}. The difference is purchases your cards "
+                "billed to a neighbouring statement."
+            )
+        )
 
     with st.expander("Filters"):
         f1, f2 = st.columns(2)
@@ -292,7 +354,7 @@ with spending_tab:
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Net spend", money(net_spend))
-    m1.caption(f"after {money(refunded)} of refunds" if refunded else "no refunds here")
+    m1.caption(md(f"after {money(refunded)} of refunds") if refunded else "no refunds here")
     m2.metric("Purchases", f"{len(expenses_only):,}")
     m3.metric(
         "Average purchase",
@@ -307,7 +369,7 @@ with spending_tab:
             st.subheader("By category")
             st.altair_chart(
                 C.category_spend(F.category_spend(outgoing), mode),
-                use_container_width=True,
+                width="stretch",
                 theme=None,
             )
         with table_col:
@@ -317,7 +379,7 @@ with spending_tab:
             )
             st.dataframe(
                 by_card.rename("Net spend").reset_index().rename(columns={"Card": "Account"}),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Net spend": st.column_config.NumberColumn("Net spend", format="$%.2f")
@@ -329,7 +391,7 @@ with spending_tab:
             outgoing.sort_values("Date", ascending=False)[
                 ["Date", "Description", "Amount", "Card", "Category", "Type"]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
@@ -351,9 +413,11 @@ with accounts_tab:
     r2.metric("Card debt", money(report["card_debt"]))
     r3.metric("Net worth", money(report["net_worth"]))
     st.caption(
-        f"{money(report['assets'])} held − {money(report['card_debt'])} owed = "
-        f"{money(report['net_worth'])}. Every transfer pair cancels, so this is "
-        "simply the sum of the whole sheet."
+        md(
+            f"{money(report['assets'])} held − {money(report['card_debt'])} owed = "
+            f"{money(report['net_worth'])}. Every transfer pair cancels, so this is "
+            "simply the sum of the whole sheet."
+        )
     )
 
     st.divider()
@@ -364,7 +428,9 @@ with accounts_tab:
             market = F.latest_valuations(valuations).get(account)
             column.metric(account, money(market if market is not None else balances.get(account, 0.0)))
             if market is not None:
-                column.caption(f"market value · {money(balances.get(account, 0.0))} contributed")
+                column.caption(
+                    md(f"market value · {money(balances.get(account, 0.0))} contributed")
+                )
 
     st.subheader("What you owe")
     for column, account in zip(st.columns(len(F.CARD_ACCOUNTS)), F.CARD_ACCOUNTS):
@@ -376,7 +442,7 @@ with accounts_tab:
             st.caption("Kept out of the tiles above; their history still counts everywhere else.")
             st.dataframe(
                 F.account_summary(df).query("Account in @closed"),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Balance": st.column_config.NumberColumn("Balance", format="$%.2f"),
@@ -394,14 +460,16 @@ with accounts_tab:
         )
     if len(orphans):
         st.warning(
-            f"{len(orphans)} transfer legs have no counter-leg, "
-            f"{money(abs(report['transfer_residual']))} in total. Net worth is still "
-            "correct — the money really did leave — but these movements are "
-            "invisible to the spending views."
+            md(
+                f"{len(orphans)} transfer legs have no counter-leg, "
+                f"{money(abs(report['transfer_residual']))} in total. Net worth is "
+                "still correct — the money really did leave — but these movements "
+                "are invisible to the spending views."
+            )
         )
         st.dataframe(
             orphans[["Date", "Description", "Amount", "Card"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
@@ -431,7 +499,7 @@ with accounts_tab:
             )
             st.dataframe(
                 plan[["Date", "Description", "Amount", "From", "To"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
@@ -464,17 +532,19 @@ with portfolio_tab:
     if valuations.empty:
         st.subheader("No valuations logged yet")
         st.markdown(
-            "The balances elsewhere in this app are **cash you contributed**, not "
-            "what your holdings are worth. Schwab reads "
-            f"**{money(F.cost_basis(df, 'Schwab Brokerage'))}** because that is "
-            "what you paid in — the market has had no say in that number.\n\n"
-            "Log your account's total value once a week and this tab starts "
-            "separating market movement from deposits."
+            md(
+                "The balances elsewhere in this app are **cash you contributed**, "
+                "not what your holdings are worth. Schwab reads "
+                f"**{money(F.cost_basis(df, 'Schwab Brokerage'))}** because that is "
+                "what you paid in — the market has had no say in that number.\n\n"
+                "Log your account's total value once a week and this tab starts "
+                "separating market movement from deposits."
+            )
         )
     else:
         st.dataframe(
             position,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Contributed": st.column_config.NumberColumn(format="$%.2f"),
@@ -509,18 +579,18 @@ with portfolio_tab:
                 st.subheader("Value against what you put in")
                 st.caption("The gap between the two lines is your gain.")
                 st.altair_chart(
-                    C.market_vs_basis(history, mode), use_container_width=True, theme=None
+                    C.market_vs_basis(history, mode), width="stretch", theme=None
                 )
             with right:
                 st.subheader("Weekly movement")
                 st.caption("Change in value with deposits taken out.")
                 st.altair_chart(
-                    C.weekly_gain(history, mode), use_container_width=True, theme=None
+                    C.weekly_gain(history, mode), width="stretch", theme=None
                 )
 
         st.dataframe(
             history,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Week of", format="DD MMM YYYY"),
@@ -643,7 +713,7 @@ with st.sidebar:
         statement = st.selectbox(
             "Statement month", choices, index=1, format_func=label_period
         )
-        submitted = st.form_submit_button("Add", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Add", type="primary", width="stretch")
 
     if submitted:
         if amount <= 0:
