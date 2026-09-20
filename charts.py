@@ -190,15 +190,28 @@ def earned_vs_spent(summary: pd.DataFrame, mode: str):
     return _style(bars.configure_scale(bandPaddingInner=0.18), ink)
 
 
-def category_spend(spend: pd.Series, mode: str, limit: int = 12):
-    """Magnitude comparison: one hue, sorted, direct-labelled."""
+def category_bars(amounts: pd.Series, mode: str, limit: int = 12):
+    """Magnitude comparison: one hue, sorted, direct-labelled.
+
+    Used for both spend-by-category and income-by-source; nothing about it is
+    specific to money going out.
+    """
     ink = palette(mode)
     data = (
-        spend.head(limit)
+        amounts.head(limit)
         .rename("Amount")
         .rename_axis("Category")
         .reset_index()
     )
+    # Whole dollars are right for rent and groceries, but income carries $0.02
+    # dividends that a 0-decimal label flattens to "$0". Small values keep their
+    # cents; large ones stay uncluttered.
+    data["Label"] = [
+        f"{'−' if v < 0 else ''}${abs(v):,.2f}"
+        if abs(v) < 10
+        else f"{'−' if v < 0 else ''}${abs(v):,.0f}"
+        for v in data["Amount"]
+    ]
     base = alt.Chart(data).encode(
         y=alt.Y("Category:N", sort="-x", axis=alt.Axis(title=None, labelLimit=140)),
         # Headroom so the direct label on the longest bar is not clipped.
@@ -221,7 +234,7 @@ def category_spend(spend: pd.Series, mode: str, limit: int = 12):
     )
     labels = base.mark_text(
         align="left", dx=6, fontSize=11, color=ink["muted"], font=FONT
-    ).encode(text=alt.Text("Amount:Q", format="$,.0f"))
+    ).encode(text=alt.Text("Label:N"))
     height = max(140, 26 * len(data))
     return _style(alt.layer(bars, labels).properties(height=height), ink)
 

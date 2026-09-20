@@ -335,6 +335,14 @@ def category_spend(df: pd.DataFrame) -> pd.Series:
     return (-outgoing.groupby("Category")["Amount"].sum()).sort_values(ascending=False)
 
 
+def income_by_category(df: pd.DataFrame) -> pd.Series:
+    """Income grouped by source: Salary, Cashback, Interest, Gift and so on."""
+    rows = df[df["Type"] == "Income"]
+    if rows.empty:
+        return pd.Series(dtype="float64")
+    return rows.groupby("Category")["Amount"].sum().sort_values(ascending=False)
+
+
 def net_into_savings(df: pd.DataFrame) -> float:
     """Net money put away into savings and investment pots over these rows.
 

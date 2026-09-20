@@ -259,8 +259,10 @@ if period == accruing:
         icon=None,
     )
 
-overview_tab, spending_tab, accounts_tab, portfolio_tab = st.tabs(
-    ["Overview", "Spending", "Accounts", "Portfolio"]
+# Earnings sits before Spending so the tabs read in the same order as the
+# Overview metrics: what came in, then what went out.
+overview_tab, earnings_tab, spending_tab, accounts_tab, portfolio_tab = st.tabs(
+    ["Overview", "Earnings", "Spending", "Accounts", "Portfolio"]
 )
 
 
@@ -381,6 +383,121 @@ with overview_tab:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Earnings
+# ──────────────────────────────────────────────────────────────────────────────
+
+with earnings_tab:
+    # Mirrors the Spending tab, and follows the same header control, so the
+    # headline here always equals the Overview's Earned for the same period.
+    incoming = df[(df["Type"] == "Income") & (df[basis_column] == period)].copy()
+    st.caption(
+        f"{label_period(period)} · {F.BASIS_LABEL[basis].lower()}"
+        + (
+            f" · covering transactions dated {incoming['Date'].min():%d %b %Y} "
+            f"to {incoming['Date'].max():%d %b %Y}"
+            if not incoming.empty
+            else ""
+        )
+    )
+
+    other = "calendar" if basis == "statement" else "statement"
+    earned_other = df[
+        (df["Type"] == "Income")
+        & (df[F.BASIS_COLUMN[other]] == period)
+        & (~df["Category"].isin(F.NON_EARNED_CATEGORIES))
+    ]["Amount"].sum()
+    if abs(current["Earned"] - earned_other) > 0.005:
+        st.caption(
+            md(
+                f"On a {F.BASIS_LABEL[other].lower()} basis the same month comes "
+                f"to {money(earned_other)}."
+            )
+        )
+
+    with st.expander("Filters"):
+        e1, e2 = st.columns(2)
+        into = sorted(incoming["Card"].unique())
+        sources = sorted(incoming["Category"].unique())
+        pick_into = e1.multiselect("Paid into", into, placeholder="All accounts")
+        pick_sources = e2.multiselect("Sources", sources, placeholder="All sources")
+        st.caption("Leave a filter empty to include everything.")
+    if pick_into:
+        incoming = incoming[incoming["Card"].isin(pick_into)]
+    if pick_sources:
+        incoming = incoming[incoming["Category"].isin(pick_sources)]
+
+    # Opening balances are bookkeeping entries, so they stay out of the
+    # headline exactly as they do on the Overview.
+    opening = incoming[incoming["Category"].isin(F.NON_EARNED_CATEGORIES)]
+    earned_rows = incoming[~incoming["Category"].isin(F.NON_EARNED_CATEGORIES)]
+    earned_total = earned_rows["Amount"].sum()
+    salary_total = earned_rows.loc[
+        earned_rows["Category"] == "Salary", "Amount"
+    ].sum()
+
+    e1, e2, e3 = st.columns(3)
+    e1.metric("Earned", money(earned_total))
+    e1.caption(f"{len(earned_rows)} payment{'' if len(earned_rows) == 1 else 's'}")
+    e2.metric("Salary", money(salary_total))
+    e2.caption(
+        "—"
+        if earned_total <= 0
+        else f"{salary_total / earned_total * 100:,.0f}% of everything earned"
+    )
+    e3.metric("Everything else", money(earned_total - salary_total))
+    e3.caption("refunds of your own money are not counted here")
+
+    if len(opening):
+        st.caption(
+            md(
+                f"Excludes {money(opening['Amount'].sum())} of opening balances — "
+                "the figures that seeded each account, not money earned."
+            )
+        )
+
+    if earned_rows.empty:
+        st.info("No income recorded in this period.")
+    else:
+        chart_col, table_col = st.columns([3, 2])
+        with chart_col:
+            st.subheader("By source")
+            st.altair_chart(
+                C.category_bars(F.income_by_category(earned_rows), mode),
+                width="stretch",
+                theme=None,
+            )
+        with table_col:
+            st.subheader("Paid into")
+            by_account = (
+                earned_rows.groupby("Card")["Amount"].sum().sort_values(ascending=False)
+            )
+            st.dataframe(
+                by_account.rename("Earned")
+                .reset_index()
+                .rename(columns={"Card": "Account"}),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Earned": st.column_config.NumberColumn("Earned", format="dollar")
+                },
+            )
+
+        st.subheader("Payments")
+        st.dataframe(
+            incoming.sort_values("Date", ascending=False)[
+                ["Date", "Description", "Amount", "Card", "Category"]
+            ],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
+                "Amount": st.column_config.NumberColumn("Amount", format="dollar"),
+                "Category": st.column_config.TextColumn("Source"),
+            },
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Spending
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -446,7 +563,7 @@ with spending_tab:
         with chart_col:
             st.subheader("By category")
             st.altair_chart(
-                C.category_spend(F.category_spend(outgoing), mode),
+                C.category_bars(F.category_spend(outgoing), mode),
                 width="stretch",
                 theme=None,
             )
