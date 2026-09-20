@@ -114,7 +114,7 @@ else:
     # ═══════════════════════════════════════════════════════════════════════════
     st.header("💰 Account Balances")
 
-    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Apple Card", "Target", "Splitwise", "Samsung Card", "Other"]
+    CARD_ACCOUNTS = ["Chase", "Amex", "Discover", "Target", "Splitwise", "Samsung Card", "Other"]
     BANK_ACCOUNTS = [
         "Checking", "Savings", "Marcus HYSA",
         "Fidelity Brokerage", "Fidelity Cash Management", "Schwab Brokerage",
