@@ -112,7 +112,14 @@ def net_worth(series: pd.DataFrame, mode: str, highlight: pd.Period | None = Non
     )
 
     base = alt.Chart(data).encode(
-        x=alt.X("Date:T", axis=alt.Axis(format="%b %y", title=None, tickCount="month")),
+        # No forced per-month tick: at dashboard widths a tick per month runs
+        # the labels into each other ("Aug 26Sep 26").
+        x=alt.X(
+            "Date:T",
+            axis=alt.Axis(
+                format="%b %y", title=None, labelOverlap="greedy", tickCount=7
+            ),
+        ),
         y=alt.Y(
             "Net worth:Q",
             axis=alt.Axis(format=MONEY, title=None),
@@ -197,7 +204,9 @@ def category_spend(spend: pd.Series, mode: str, limit: int = 12):
         # Headroom so the direct label on the longest bar is not clipped.
         x=alt.X(
             "Amount:Q",
-            axis=alt.Axis(format=MONEY, title=None),
+            # nice=False is needed to hold the label headroom, so the tick
+            # count has to be asked for explicitly or Vega emits one per $100.
+            axis=alt.Axis(format=MONEY, title=None, tickCount=5),
             scale=alt.Scale(
                 domainMax=float(data["Amount"].max()) * 1.18 if len(data) else 1.0,
                 nice=False,

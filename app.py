@@ -29,30 +29,58 @@ ALL_TIME = "All time"
 # ──────────────────────────────────────────────────────────────────────────────
 
 def theme_mode() -> str:
-    """Which palette to draw with. Dark is a selected palette, not a flip."""
-    for getter in (
-        lambda: st.context.theme.type,
-        lambda: st.get_option("theme.base"),
-    ):
-        try:
-            value = getter()
-        except Exception:
-            continue
-        if value in ("light", "dark"):
-            return value
-    return "light"
+    """Which palette to draw with. Dark is a selected palette, not a flip.
+
+    Order matters, and it is not the obvious one. Measured against Streamlit
+    1.64:
+
+        config theme.base = dark   -> get_option "dark",  context.theme "light"
+        config unset, browser light-> get_option None,    context.theme "light"
+        config unset, browser dark -> get_option None,    context.theme "dark"
+
+    ``st.context.theme.type`` reports the *browser's* preference and ignores a
+    configured theme, so trusting it first paints the light palette onto a dark
+    app — near-black legend text on a near-black surface. The configured theme
+    wins when there is one; the browser decides only when there is not.
+    """
+    try:
+        configured = st.get_option("theme.base")
+    except Exception:
+        configured = None
+    if configured in ("light", "dark"):
+        return configured
+    try:
+        preferred = st.context.theme.type
+    except Exception:
+        preferred = None
+    return preferred if preferred in ("light", "dark") else "light"
 
 
 def money(value: float | None, places: int = 2) -> str:
+    """Display money. The sign goes outside the currency symbol, never inside."""
     if value is None or pd.isna(value):
         return "—"
-    return f"${value:,.{places}f}"
+    return f"{'−' if value < 0 else ''}${abs(value):,.{places}f}"
 
 
 def signed(value: float | None) -> str:
+    """Money with an explicit sign, for prose."""
     if value is None or pd.isna(value):
         return "—"
     return f"{'+' if value >= 0 else '−'}${abs(value):,.2f}"
+
+
+def delta(value: float | None) -> str | None:
+    """A st.metric delta string.
+
+    Streamlit decides the arrow direction and colour by looking for a leading
+    ASCII hyphen, so the typographic minus used everywhere else in the UI would
+    paint every decrease as a green rise. This is the one place that character
+    matters more than the typography.
+    """
+    if value is None or pd.isna(value):
+        return None
+    return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
 
 
 def percent(value: float | None) -> str:
@@ -143,7 +171,24 @@ with refresh:
         st.cache_data.clear()
         st.rerun()
 
-back, picker, forward, basis_col, asof = st.columns([1, 2.4, 1, 3.4, 5.2])
+def control_row():
+    """A row that keeps its controls side by side at phone width.
+
+    st.columns stacks below roughly 640px, which turned the period control into
+    four full-width rows before any number was visible. Horizontal containers
+    do not stack; the fallback keeps an older Streamlit from crashing outright.
+    """
+    try:
+        return st.container(horizontal=True, vertical_alignment="center")
+    except TypeError:
+        return st.container()
+
+
+with control_row():
+    back = st.container()
+    picker = st.container(width=190)
+    forward = st.container()
+    basis_col = st.container()
 
 # One control, read before anything is computed, driving every tab. Statement
 # month is the default because that is when a card purchase is actually paid.
@@ -163,16 +208,19 @@ basis = basis_col.radio(
 summary = F.monthly_summary(df, basis)
 periods = list(summary["Period"])
 
-# Default to the newest period, and clamp on every run: switching basis can
-# change how many periods exist.
+# Open on the newest *closed* period: the newest one is still accruing, and
+# landing on a half-filled cycle reads as a catastrophe rather than a month.
+# Clamp on every run, since switching basis can change how many periods exist.
+accruing = F.accruing_period(df, basis)
 if "period_index" not in st.session_state:
-    st.session_state.period_index = len(periods) - 1
+    closed = [i for i, p in enumerate(periods) if p != accruing]
+    st.session_state.period_index = closed[-1] if closed else len(periods) - 1
 index = min(max(st.session_state.period_index, 0), len(periods) - 1)
-if back.button("‹", width="stretch", disabled=index == 0, help="Previous month"):
+if back.button("‹", disabled=index == 0, help="Previous month"):
     st.session_state.period_index = index - 1
     st.rerun()
 if forward.button(
-    "›", width="stretch", disabled=index >= len(periods) - 1, help="Next month"
+    "›", disabled=index >= len(periods) - 1, help="Next month"
 ):
     st.session_state.period_index = index + 1
     st.rerun()
@@ -193,12 +241,20 @@ basis_column = F.BASIS_COLUMN[basis]
 month_rows = df[df[basis_column] == period]
 previous = summary.iloc[index - 1] if index > 0 else None
 current = summary.iloc[index]
-asof.caption(
+st.caption(
     md(
         f"{len(df):,} transactions · {df['Date'].min():%d %b %Y} to "
         f"{df['Date'].max():%d %b %Y} · net worth {money(F.net_worth(df, valuations))}"
     )
 )
+
+if period == accruing:
+    st.info(
+        f"{label_period(period)} is still open — more transactions will land in "
+        "it before it closes, so its totals are not yet comparable with the "
+        "months before it.",
+        icon=None,
+    )
 
 overview_tab, spending_tab, accounts_tab, portfolio_tab = st.tabs(
     ["Overview", "Spending", "Accounts", "Portfolio"]
@@ -214,7 +270,7 @@ with overview_tab:
     a.metric(
         "Earned",
         money(current["Earned"]),
-        delta=None if previous is None else signed(current["Earned"] - previous["Earned"]),
+        delta=None if previous is None else delta(current["Earned"] - previous["Earned"]),
     )
     other = current["Earned"] - current["Salary"]
     a.caption(
@@ -227,26 +283,45 @@ with overview_tab:
     b.metric(
         "Spent",
         money(current["Spent"]),
-        delta=None if previous is None else signed(current["Spent"] - previous["Spent"]),
+        delta=None if previous is None else delta(current["Spent"] - previous["Spent"]),
         delta_color="inverse",
     )
     b.caption(f"expenses net of refunds · {F.BASIS_LABEL[basis].lower()}")
 
     c.metric(
-        "Saved",
-        money(current["Saved"]),
-        delta=None if previous is None else signed(current["Saved"] - previous["Saved"]),
+        "Kept",
+        money(current["Kept"]),
+        delta=None if previous is None else delta(current["Kept"] - previous["Kept"]),
     )
-    c.caption(
-        md(f"net worth moved {signed(nw_change.get(period, 0.0))}")
-        if basis == "calendar"
-        else "earned, less what this cycle's bills came to"
-    )
+    c.caption("new money this period — earned, less the bills")
 
-    d.metric("Save rate", percent(current["Save rate"]))
-    d.caption(
-        "—" if pd.isna(current["Save rate"]) else "of everything earned this month"
-    )
+    d.metric("Kept %", percent(current["Kept %"]))
+    d.caption("—" if pd.isna(current["Kept %"]) else "of everything earned")
+
+    # Moving cash into HYSA is not the same event as keeping new money, and
+    # leaving it off the page invites exactly that confusion.
+    put_away = F.net_into_savings(month_rows)
+    debt_cut = F.net_debt_paid(month_rows)
+    moved = []
+    if abs(put_away) >= 1:
+        moved.append(
+            f"**{money(put_away)}** {'into' if put_away > 0 else 'out of'} "
+            "savings and investment accounts"
+        )
+    if abs(debt_cut) >= 1:
+        moved.append(
+            f"**{money(abs(debt_cut))}** of card debt "
+            f"{'paid down' if debt_cut > 0 else 'added'}"
+        )
+    if moved:
+        st.caption(
+            md(
+                "Money moved between your own accounts this period: "
+                + ", and ".join(moved)
+                + ". That is cash you already had being relocated, so it is not "
+                "counted in Kept — it was already earned in an earlier period."
+            )
+        )
 
     st.divider()
 
@@ -295,10 +370,10 @@ with overview_tab:
             width="stretch",
             hide_index=True,
             column_config={
-                col: st.column_config.NumberColumn(col, format="$%.2f")
-                for col in ("Earned", "Salary", "Spent", "Saved")
+                col: st.column_config.NumberColumn(col, format="dollar")
+                for col in ("Earned", "Salary", "Spent", "Kept")
             }
-            | {"Save rate": st.column_config.NumberColumn("Save rate", format="%.1f%%")},
+            | {"Kept %": st.column_config.NumberColumn("Kept %", format="%.1f%%")},
         )
 
 
@@ -382,7 +457,7 @@ with spending_tab:
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Net spend": st.column_config.NumberColumn("Net spend", format="$%.2f")
+                    "Net spend": st.column_config.NumberColumn("Net spend", format="dollar")
                 },
             )
 
@@ -395,7 +470,7 @@ with spending_tab:
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
-                "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                "Amount": st.column_config.NumberColumn("Amount", format="dollar"),
             },
         )
 
@@ -405,18 +480,20 @@ with spending_tab:
 # ──────────────────────────────────────────────────────────────────────────────
 
 with accounts_tab:
-    report = F.integrity_report(df)
+    report = F.integrity_report(df, valuations)
     balances = F.balances(df)
 
     r1, r2, r3 = st.columns(3)
     r1.metric("Assets", money(report["assets"]))
     r2.metric("Card debt", money(report["card_debt"]))
     r3.metric("Net worth", money(report["net_worth"]))
+    valued = report["valued_at_market"]
     st.caption(
         md(
             f"{money(report['assets'])} held − {money(report['card_debt'])} owed = "
             f"{money(report['net_worth'])}. Every transfer pair cancels, so this is "
-            "simply the sum of the whole sheet."
+            "the sum of the whole sheet"
+            + (f", with {', '.join(valued)} at market value." if valued else ".")
         )
     )
 
@@ -445,7 +522,7 @@ with accounts_tab:
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Balance": st.column_config.NumberColumn("Balance", format="$%.2f"),
+                    "Balance": st.column_config.NumberColumn("Balance", format="dollar"),
                     "Last activity": st.column_config.DateColumn(format="DD MMM YYYY"),
                 },
             )
@@ -473,7 +550,7 @@ with accounts_tab:
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
-                "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                "Amount": st.column_config.NumberColumn("Amount", format="dollar"),
             },
         )
     else:
@@ -503,7 +580,7 @@ with accounts_tab:
                 hide_index=True,
                 column_config={
                     "Date": st.column_config.DateColumn("Date", format="DD MMM YYYY"),
-                    "Amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                    "Amount": st.column_config.NumberColumn("Amount", format="dollar"),
                 },
             )
             leftover = R.unclassified(df)
@@ -547,9 +624,9 @@ with portfolio_tab:
             width="stretch",
             hide_index=True,
             column_config={
-                "Contributed": st.column_config.NumberColumn(format="$%.2f"),
-                "Market value": st.column_config.NumberColumn(format="$%.2f"),
-                "Unrealised": st.column_config.NumberColumn(format="$%.2f"),
+                "Contributed": st.column_config.NumberColumn(format="dollar"),
+                "Market value": st.column_config.NumberColumn(format="dollar"),
+                "Unrealised": st.column_config.NumberColumn(format="dollar"),
                 "Return %": st.column_config.NumberColumn(format="%.2f%%"),
                 "Valued on": st.column_config.DateColumn(format="DD MMM YYYY"),
             },
@@ -594,12 +671,12 @@ with portfolio_tab:
             hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Week of", format="DD MMM YYYY"),
-                "Market value": st.column_config.NumberColumn(format="$%.2f"),
-                "Contributed": st.column_config.NumberColumn("Deposits", format="$%.2f"),
-                "Change": st.column_config.NumberColumn(format="$%.2f"),
-                "Market gain": st.column_config.NumberColumn(format="$%.2f"),
-                "Cost basis": st.column_config.NumberColumn(format="$%.2f"),
-                "Unrealised": st.column_config.NumberColumn(format="$%.2f"),
+                "Market value": st.column_config.NumberColumn(format="dollar"),
+                "Contributed": st.column_config.NumberColumn("Deposits", format="dollar"),
+                "Change": st.column_config.NumberColumn(format="dollar"),
+                "Market gain": st.column_config.NumberColumn(format="dollar"),
+                "Cost basis": st.column_config.NumberColumn(format="dollar"),
+                "Unrealised": st.column_config.NumberColumn(format="dollar"),
             },
         )
 

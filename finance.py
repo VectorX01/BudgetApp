@@ -76,6 +76,15 @@ CARD_ACCOUNTS = ["Chase", "Amex", "Target", "Samsung Card"]
 ARCHIVED_ACCOUNTS = ["Apple Card", "Discover", "Splitwise"]
 # Market-exposed: these are the ones a weekly valuation is worth logging for.
 INVESTMENT_ACCOUNTS = ["Schwab Brokerage", "Fidelity Brokerage"]
+# Where money goes to be put away. Checking and Savings are transactional —
+# salary lands in them and bills leave from them — so cash resting there has
+# not been set aside in any meaningful sense.
+SAVINGS_ACCOUNTS = [
+    "Marcus HYSA",
+    "Fidelity Cash Management",
+    "Fidelity Brokerage",
+    "Schwab Brokerage",
+]
 
 EXPENSE_CATEGORIES = [
     "Dining", "Groceries", "Transit", "Rent", "Personal", "Travel",
@@ -235,7 +244,14 @@ def monthly_summary(df: pd.DataFrame, basis: str = "statement") -> pd.DataFrame:
 
         earned   income, excluding bookkeeping-only opening balances
         spent    expenses net of refunds
-        saved    earned - spent
+        kept     earned - spent
+
+    ``Kept`` is deliberately not called "saved". It measures new money retained
+    this period, which is a different thing from money moved into a savings
+    account: a transfer from Savings to Marcus HYSA relocates cash that was
+    already earned and already kept in an earlier period. Counting it again
+    here would double-count it. ``net_into_savings`` reports that movement
+    separately.
 
     ``basis="statement"`` (the default) groups rows the way the card bills land,
     which is how the money is actually felt: a July swipe is not paid for until
@@ -249,7 +265,7 @@ def monthly_summary(df: pd.DataFrame, basis: str = "statement") -> pd.DataFrame:
     """
     if df.empty:
         return pd.DataFrame(
-            columns=["Period", "Earned", "Salary", "Spent", "Saved", "Save rate"]
+            columns=["Period", "Earned", "Salary", "Spent", "Kept", "Kept %"]
         )
 
     column = BASIS_COLUMN[basis]
@@ -268,14 +284,26 @@ def monthly_summary(df: pd.DataFrame, basis: str = "statement") -> pd.DataFrame:
     summary["Earned"] = earned.reindex(months).fillna(0.0)
     summary["Salary"] = salary.reindex(months).fillna(0.0)
     summary["Spent"] = spent.reindex(months).fillna(0.0)
-    summary["Saved"] = summary["Earned"] - summary["Spent"]
+    summary["Kept"] = summary["Earned"] - summary["Spent"]
     # A save rate computed against a near-zero month is noise, not information
     # (March 2026 earned $2.54 and would read -77,128%).
-    summary["Save rate"] = (
-        (summary["Saved"] / summary["Earned"]).where(summary["Earned"] >= RATE_FLOOR)
+    summary["Kept %"] = (
+        (summary["Kept"] / summary["Earned"]).where(summary["Earned"] >= RATE_FLOOR)
         * 100
     )
     return summary.rename_axis("Period").reset_index()
+
+
+def accruing_period(df: pd.DataFrame, basis: str = "statement") -> pd.Period | None:
+    """The period that is still filling up: the one holding the newest row.
+
+    A period mid-flight is not comparable with a closed one — its income and
+    its bills have arrived in different proportions — so the UI labels it and
+    does not open on it.
+    """
+    if df.empty:
+        return None
+    return df.loc[df["Date"].idxmax(), BASIS_COLUMN[basis]]
 
 
 def net_worth_change(df: pd.DataFrame) -> pd.Series:
@@ -307,17 +335,21 @@ def category_spend(df: pd.DataFrame) -> pd.Series:
     return (-outgoing.groupby("Category")["Amount"].sum()).sort_values(ascending=False)
 
 
-def debt_paid(df: pd.DataFrame) -> float:
-    """Money moved onto card accounts, i.e. debt paid down."""
-    incoming = df[(df["Type"] == "Transfer (in)") & (df["Card"].isin(CARD_ACCOUNTS + ARCHIVED_ACCOUNTS))]
-    return float(incoming["Amount"].sum())
+def net_into_savings(df: pd.DataFrame) -> float:
+    """Net money put away into savings and investment pots over these rows.
+
+    Net, not gross: a $2,400 transfer out of Marcus on the same day as a $2,400
+    transfer in has put nothing away. This answers "did my long-term pots grow",
+    which is the question a transfer to HYSA actually raises — and it is not the
+    same question as ``Kept``.
+    """
+    return float(df[df["Card"].isin(SAVINGS_ACCOUNTS)]["Amount"].sum())
 
 
-def moved_to_savings(df: pd.DataFrame) -> float:
-    """Money moved into savings and investment accounts."""
-    targets = [a for a in ASSET_ACCOUNTS if a not in ("Checking",)]
-    incoming = df[(df["Type"] == "Transfer (in)") & (df["Card"].isin(targets))]
-    return float(incoming["Amount"].sum())
+def net_debt_paid(df: pd.DataFrame) -> float:
+    """Net reduction in card balances: payments made less new charges."""
+    cards = CARD_ACCOUNTS + ARCHIVED_ACCOUNTS
+    return float(df[df["Card"].isin(cards)]["Amount"].sum())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -399,8 +431,9 @@ def mtm_history(df: pd.DataFrame, valuations: pd.DataFrame, account: str) -> pd.
         basis = cost_basis(df, account, as_of=date)
         if previous is None:
             # No earlier snapshot to compare against, so there is no weekly
-            # movement yet. Unrealised still carries the full picture.
-            contributed = basis
+            # movement and no weekly deposit figure either — repeating the cost
+            # basis in the Deposits column just duplicates the column beside it.
+            contributed = None
             change = None
             gain = None
         else:
@@ -454,12 +487,21 @@ def unmatched_transfers(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(keep).sort_values("Date")
 
 
-def integrity_report(df: pd.DataFrame) -> dict[str, object]:
-    """Everything the Accounts tab needs to prove the books still reconcile."""
+def integrity_report(
+    df: pd.DataFrame, valuations: pd.DataFrame | None = None
+) -> dict[str, object]:
+    """Everything the Accounts tab needs to prove the books still reconcile.
+
+    Assets use market value wherever a valuation exists, matching ``net_worth``.
+    Without that the page would show one net worth in its header and a different
+    one in its reconciliation strip.
+    """
     legs = df[df["Type"].isin(TRANSFER_TYPES)]
     orphans = unmatched_transfers(df)
+    latest = latest_valuations(valuations)
     assets = sum(
-        float(df.loc[df["Card"] == a, "Amount"].sum()) for a in ASSET_ACCOUNTS
+        latest.get(a, float(df.loc[df["Card"] == a, "Amount"].sum()))
+        for a in ASSET_ACCOUNTS
     )
     debt = -sum(
         float(df.loc[df["Card"] == a, "Amount"].sum())
@@ -472,6 +514,7 @@ def integrity_report(df: pd.DataFrame) -> dict[str, object]:
         "transfer_residual": float(legs["Amount"].sum()),
         "orphans": orphans,
         "unlisted_accounts": unlisted_accounts(df),
+        "valued_at_market": sorted(latest),
         "uncategorised_income": int(
             ((df["Type"] == "Income") & (~df["Category"].isin(INCOME_CATEGORIES)))
             .sum()

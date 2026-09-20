@@ -95,6 +95,11 @@ Splitwise. History must remain queryable; they must not occupy balance tiles.
 - Portfolio valuation is recorded weekly as a market value **per account**, by
   hand. No holdings, tickers, share counts or price feeds — explicitly rejected
   as overkill.
+- The headline surplus is called **Kept**, never "Saved". Moving $4,000 from
+  Savings into Marcus HYSA is a relocation of money earned in an earlier
+  period, not new saving, and counting it would double-count. Money moved
+  between the owner's own accounts is reported separately and explicitly, so
+  the absence of a savings transfer from Kept never reads as a missing number.
 
 ## Evidence on Hand
 
