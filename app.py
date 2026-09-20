@@ -185,10 +185,13 @@ def control_row():
 
 
 with control_row():
-    back = st.container()
-    picker = st.container(width=190)
-    forward = st.container()
-    basis_col = st.container()
+    # width="content" on every child: inside a horizontal container a plain
+    # st.container stretches, which spreads the stepper, the picker and the
+    # basis toggle across the full width with dead space between them.
+    back = st.container(width="content")
+    picker = st.container(width=150)
+    forward = st.container(width="content")
+    basis_col = st.container(width="content")
 
 # One control, read before anything is computed, driving every tab. Statement
 # month is the default because that is when a card purchase is actually paid.
@@ -665,20 +668,35 @@ with portfolio_tab:
                     C.weekly_gain(history, mode), width="stretch", theme=None
                 )
 
-        st.dataframe(
-            history,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Date": st.column_config.DateColumn("Week of", format="DD MMM YYYY"),
-                "Market value": st.column_config.NumberColumn(format="dollar"),
-                "Contributed": st.column_config.NumberColumn("Deposits", format="dollar"),
-                "Change": st.column_config.NumberColumn(format="dollar"),
-                "Market gain": st.column_config.NumberColumn(format="dollar"),
-                "Cost basis": st.column_config.NumberColumn(format="dollar"),
-                "Unrealised": st.column_config.NumberColumn(format="dollar"),
-            },
+        # The first snapshot has no prior week, so its Change, Deposits and
+        # Market gain are empty — and Streamlit prints every empty cell as the
+        # word "None". It becomes a caption instead of a row of nulls.
+        baseline = history.iloc[0]
+        st.caption(
+            md(
+                f"Baseline {baseline['Date']:%d %b %Y}: "
+                f"{money(baseline['Market value'])} against "
+                f"{money(baseline['Cost basis'])} contributed "
+                f"({signed(baseline['Unrealised'])})."
+            )
         )
+        if len(history) > 1:
+            st.dataframe(
+                history.iloc[1:],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Date": st.column_config.DateColumn("Week of", format="DD MMM YYYY"),
+                    "Market value": st.column_config.NumberColumn(format="dollar"),
+                    "Contributed": st.column_config.NumberColumn(
+                        "Deposits", format="dollar"
+                    ),
+                    "Change": st.column_config.NumberColumn(format="dollar"),
+                    "Market gain": st.column_config.NumberColumn(format="dollar"),
+                    "Cost basis": st.column_config.NumberColumn(format="dollar"),
+                    "Unrealised": st.column_config.NumberColumn(format="dollar"),
+                },
+            )
 
     st.divider()
     st.subheader("Log this week's values")

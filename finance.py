@@ -433,9 +433,11 @@ def mtm_history(df: pd.DataFrame, valuations: pd.DataFrame, account: str) -> pd.
             # No earlier snapshot to compare against, so there is no weekly
             # movement and no weekly deposit figure either — repeating the cost
             # basis in the Deposits column just duplicates the column beside it.
-            contributed = None
-            change = None
-            gain = None
+            # NaN, not None: a None in a numeric column makes pandas fall back
+            # to object dtype and Streamlit then prints the word "None".
+            contributed = float("nan")
+            change = float("nan")
+            gain = float("nan")
         else:
             prev_date, prev_market = previous
             window = df[
