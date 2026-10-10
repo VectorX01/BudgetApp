@@ -71,7 +71,7 @@ ASSET_ACCOUNTS = [
     "Schwab Brokerage",
 ]
 # Accounts you owe money on.
-CARD_ACCOUNTS = ["Chase", "Amex", "Target", "Samsung Card"]
+CARD_ACCOUNTS = ["Chase", "Amex", "Target", "Samsung Card","Amazon Card","Citi Card","Amex Gold Card",]
 # Closed. History stays queryable; they do not get balance tiles.
 ARCHIVED_ACCOUNTS = ["Apple Card", "Discover", "Splitwise"]
 # Market-exposed: these are the ones a weekly valuation is worth logging for.
